@@ -20,6 +20,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/damon.h>
 
+#include "ops-common.h"
+
 static DEFINE_MUTEX(damon_lock);
 static int nr_running_ctxs;
 static bool running_exclusive_ctxs;
@@ -605,6 +607,7 @@ struct damon_ctx *damon_new_ctx(void)
 	ctx->addr_unit = 1;
 	ctx->min_region_sz = DAMON_MIN_REGION_SZ;
 
+	INIT_LIST_HEAD(&ctx->perf_events);
 	INIT_LIST_HEAD(&ctx->adaptive_targets);
 	INIT_LIST_HEAD(&ctx->schemes);
 
@@ -619,6 +622,19 @@ static void damon_destroy_targets(struct damon_ctx *ctx)
 		damon_destroy_target(t, ctx);
 }
 
+static void damon_perf_destroy(struct damon_ctx *ctx)
+{
+	while (!list_empty(&ctx->perf_events)) {
+		struct damon_perf_event *event =
+			list_first_entry(&ctx->perf_events, typeof(*event), list);
+
+		damon_perf_cleanup(ctx, event);
+		list_del(&event->list);
+		kfree(event);
+	}
+
+}
+
 void damon_destroy_ctx(struct damon_ctx *ctx)
 {
 	struct damos *s, *next_s;
@@ -627,6 +643,8 @@ void damon_destroy_ctx(struct damon_ctx *ctx)
 
 	damon_for_each_scheme_safe(s, next_s, ctx)
 		damon_destroy_scheme(s);
+
+	damon_perf_destroy(ctx);
 
 	kfree(ctx);
 }
@@ -1311,6 +1329,42 @@ static int damon_commit_targets(
 	return 0;
 }
 
+static int damon_commit_perf_events(struct damon_ctx *dst, struct damon_ctx *src)
+{
+	struct damon_perf_event *src_event, *new_event;
+	int err = 0;
+
+	damon_perf_destroy(dst);
+
+	list_for_each_entry(src_event, &src->perf_events, list) {
+		new_event = kzalloc_obj(*new_event);
+		if (!new_event) {
+			err = -ENOMEM;
+			goto out;
+		}
+
+		new_event->attr.type = src_event->attr.type;
+		new_event->attr.config = src_event->attr.config;
+		new_event->attr.config1 = src_event->attr.config1;
+		new_event->attr.config2 = src_event->attr.config2;
+		new_event->attr.sample_phys_addr = src_event->attr.sample_phys_addr;
+		new_event->attr.sample_freq = src_event->attr.sample_freq;
+
+		if (damon_is_running(dst)) {
+			err = damon_perf_init(dst, new_event);
+			if (err) {
+				kfree(new_event);
+				goto out;
+			}
+		}
+		list_add_tail(&new_event->list, &dst->perf_events);
+	}
+	return 0;
+out:
+	damon_perf_destroy(dst);
+	return err;
+}
+
 /**
  * damon_commit_ctx() - Commit parameters of a DAMON context to another.
  * @dst:	The commit destination DAMON context.
@@ -1336,6 +1390,9 @@ int damon_commit_ctx(struct damon_ctx *dst, struct damon_ctx *src)
 	if (err)
 		return err;
 	err = damon_commit_targets(dst, src);
+	if (err)
+		return err;
+	err = damon_commit_perf_events(dst, src);
 	if (err)
 		return err;
 	/*
@@ -2933,6 +2990,7 @@ static void kdamond_init_ctx(struct damon_ctx *ctx)
 	unsigned long sample_interval = ctx->attrs.sample_interval ?
 		ctx->attrs.sample_interval : 1;
 	struct damos *scheme;
+	struct damon_perf_event *event, *next;
 
 	ctx->passed_sample_intervals = 0;
 	ctx->next_aggregation_sis = ctx->attrs.aggr_interval / sample_interval;
@@ -2944,6 +3002,15 @@ static void kdamond_init_ctx(struct damon_ctx *ctx)
 	damon_for_each_scheme(scheme, ctx) {
 		damos_set_next_apply_sis(scheme, ctx);
 		damos_set_filters_default_reject(scheme);
+	}
+
+	list_for_each_entry_safe(event, next, &ctx->perf_events, list) {
+		int err = damon_perf_init(ctx, event);
+
+		if (err) {
+			list_del(&event->list);
+			kfree(event);
+		}
 	}
 }
 

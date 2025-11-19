@@ -15,6 +15,9 @@
 #include <linux/pagewalk.h>
 #include <linux/sched/mm.h>
 
+#include <linux/circ_buf.h>
+#include <linux/perf_event.h>
+
 #include "../internal.h"
 #include "ops-common.h"
 
@@ -935,6 +938,161 @@ static int damon_va_scheme_score(struct damon_ctx *context,
 
 	return DAMOS_MAX_SCORE;
 }
+
+#ifdef CONFIG_PERF_EVENTS
+
+struct damon_perf_buffer {
+	struct damon_access_report *reports;
+	unsigned long head;
+	unsigned long tail;
+	unsigned long size;
+};
+
+static void damon_perf_overflow(struct perf_event *perf_event, struct perf_sample_data *data,
+				struct pt_regs *regs)
+{
+	struct damon_perf_event *event = perf_event->overflow_handler_context;
+	struct damon_perf *perf = event->priv;
+	struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, smp_processor_id());
+	unsigned long head = buffer->head;
+	unsigned long tail = READ_ONCE(buffer->tail);
+
+	if (CIRC_SPACE(head, tail, buffer->size) >= 1) {
+		struct damon_access_report *report = &buffer->reports[head];
+
+		report->tid = task_pid_nr(current);
+		report->tgid = task_tgid_nr(current);
+		report->vaddr = data->addr;
+		report->paddr = data->phys_addr;
+
+		smp_store_release(&buffer->head, (head + 1) & (buffer->size - 1));
+	}
+}
+
+#define DAMON_PERF_MAX_RECORDS (1UL << 20)
+#define DAMON_PERF_INIT_RECORDS (1UL << 15)
+
+int damon_perf_init(struct damon_ctx *ctx, struct damon_perf_event *event)
+{
+	struct damon_perf *perf;
+	struct perf_event_attr attr = {
+		.type = PERF_TYPE_RAW,
+		.size = sizeof(attr),
+		.type = event->attr.type,
+		.config = event->attr.config,
+		.config1 = event->attr.config1,
+		.config2 = event->attr.config2,
+		.sample_freq = event->attr.sample_freq,
+		.freq = 1,
+		.sample_type = PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |
+			PERF_SAMPLE_PERIOD | PERF_SAMPLE_DATA_SRC |
+			(event->attr.sample_phys_addr ? PERF_SAMPLE_PHYS_ADDR : 0) |
+			PERF_SAMPLE_WEIGHT_STRUCT,
+		.precise_ip = 2,
+		.pinned = 1,
+		.disabled = 1,
+	};
+	int cpu;
+	int err = -ENOMEM;
+	bool found = false;
+
+	perf = kzalloc_obj(*perf);
+	if (!perf)
+		return -ENOMEM;
+
+	perf->event = alloc_percpu(typeof(*perf->event));
+	if (!perf->event)
+		goto free_percpu;
+
+	perf->buffer = alloc_percpu(typeof(*perf->buffer));
+	if (!perf->buffer)
+		goto free_percpu;
+
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event;
+		struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, cpu);
+
+		perf_event = perf_event_create_kernel_counter(&attr, cpu, NULL,
+				damon_perf_overflow, event);
+		if (IS_ERR(perf_event)) {
+			err = PTR_ERR(perf_event);
+			if (err == -ENODEV)
+				continue;
+			pr_err("perf event create on CPU %d failed with %d\n", cpu, err);
+			goto free_for_each_cpu;
+		}
+		found = true;
+		*per_cpu_ptr(perf->event, cpu) = perf_event;
+
+		buffer->size = DAMON_PERF_INIT_RECORDS;
+		buffer->reports = kvcalloc_node(buffer->size, sizeof(buffer->reports[0]),
+						GFP_KERNEL, cpu_to_node(cpu));
+		if (!buffer->reports)
+			goto free_for_each_cpu;
+	}
+	event->priv = perf;
+
+	return found ? 0 : -ENODEV;
+
+free_for_each_cpu:
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event = per_cpu(*perf->event, cpu);
+		struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, cpu);
+
+		if (perf_event)
+			perf_event_release_kernel(perf_event);
+		kvfree(buffer->reports);
+	}
+free_percpu:
+	free_percpu(perf->event);
+	free_percpu(perf->buffer);
+	kfree(perf);
+
+	return err;
+}
+
+void damon_perf_cleanup(struct damon_ctx *ctx, struct damon_perf_event *event)
+{
+	struct damon_perf *perf = event->priv;
+	int cpu;
+
+	if (!perf)
+		return;
+
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event = per_cpu(*perf->event, cpu);
+		struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, cpu);
+
+		if (!perf_event)
+			continue;
+		perf_event_disable(perf_event);
+		perf_event_release_kernel(perf_event);
+		kvfree(buffer->reports);
+	}
+	free_percpu(perf->event);
+	free_percpu(perf->buffer);
+	kfree(perf);
+	event->priv = NULL;
+}
+
+void damon_perf_prepare_access_checks(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+	struct damon_perf *perf = event->priv;
+	int cpu;
+
+	if (!perf)
+		return;
+
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event = per_cpu(*perf->event, cpu);
+
+		if (perf_event)
+			perf_event_enable(perf_event);
+	}
+}
+
+#endif /* CONFIG_PERF_EVENTS */
 
 static int __init damon_va_initcall(void)
 {

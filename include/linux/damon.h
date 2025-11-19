@@ -120,6 +120,7 @@ struct damon_target {
  * @size:		The size of the accessed address range.
  * @cpu:		The id of the CPU that made the access.
  * @tid:		The task id of the task that made the access.
+ * @tgid:		The task group id of the task that made the access.
  * @is_write:		Whether the access is write.
  *
  * Any DAMON API callers that notified access events can report the information
@@ -132,6 +133,7 @@ struct damon_access_report {
 	unsigned long size;
 	unsigned int cpu;
 	pid_t tid;
+	pid_t tgid;
 	bool is_write;
 /* private: */
 	unsigned long report_jiffies;	/* when this report is made */
@@ -832,6 +834,36 @@ struct damon_sample_filter {
 };
 
 /**
+ * struct damon_perf_event_attr - raw PMU event attr for access check
+ *
+ * @type:		raw PMU event type for access check
+ * @config:		raw PMU event config for access check
+ * @config1:		raw PMU event config1 for access check
+ * @config2:		raw PMU event config2 for access check
+ * @sample_phys_addr:	raw PMU event PERF_SAMPLE_PHYS_ADDR in sample_type for access check
+ * @sample_freq:	raw PMU event sample_freq for access check
+ */
+struct damon_perf_event_attr {
+	u32 type;
+	u64 config;
+	u64 config1;
+	u64 config2;
+	bool sample_phys_addr;
+	u64 sample_freq;
+};
+
+/**
+ * struct damon_perf_event - perf event for access check
+ *
+ * @priv:		Monitoring operations-specific data
+ */
+struct damon_perf_event {
+	struct damon_perf_event_attr attr;
+	void *priv;
+	struct list_head list;
+};
+
+/**
  * struct damon_ctx - Represents a context for each monitoring.  This is the
  * main interface that allows users to set the attributes and get the results
  * of the monitoring.
@@ -855,6 +887,7 @@ struct damon_sample_filter {
  * @ops:	Set of monitoring operations for given use cases.
  * @addr_unit:	Scale factor for core to ops address conversion.
  * @min_region_sz:	Minimum region size.
+ * @perf_events:	Head of perf events (&damon_perf_event) list.
  * @adaptive_targets:	Head of monitoring targets (&damon_target) list.
  * @schemes:		Head of schemes (&damos) list.
  */
@@ -909,6 +942,7 @@ struct damon_ctx {
 	unsigned long addr_unit;
 	unsigned long min_region_sz;
 
+	struct list_head perf_events;
 	struct list_head adaptive_targets;
 	struct list_head schemes;
 };
