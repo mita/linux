@@ -17,6 +17,7 @@
 
 #include <linux/circ_buf.h>
 #include <linux/perf_event.h>
+#include <linux/xarray.h>
 
 #include "../internal.h"
 #include "ops-common.h"
@@ -401,7 +402,7 @@ static void damon_va_mkold(struct mm_struct *mm, unsigned long addr)
  * Functions for the access checking of the regions
  */
 
-static void __damon_va_prepare_access_check(struct mm_struct *mm,
+static void __damon_va_basic_prepare_access_check(struct mm_struct *mm,
 					struct damon_region *r)
 {
 	r->sampling_addr = damon_rand(r->ar.start, r->ar.end);
@@ -409,7 +410,7 @@ static void __damon_va_prepare_access_check(struct mm_struct *mm,
 	damon_va_mkold(mm, r->sampling_addr);
 }
 
-static void damon_va_prepare_access_checks(struct damon_ctx *ctx)
+static void damon_va_basic_prepare_access_checks(struct damon_ctx *ctx)
 {
 	struct damon_target *t;
 	struct mm_struct *mm;
@@ -420,7 +421,7 @@ static void damon_va_prepare_access_checks(struct damon_ctx *ctx)
 		if (!mm)
 			continue;
 		damon_for_each_region(r, t)
-			__damon_va_prepare_access_check(mm, r);
+			__damon_va_basic_prepare_access_check(mm, r);
 		mmput(mm);
 	}
 }
@@ -539,7 +540,7 @@ static bool damon_va_young(struct mm_struct *mm, unsigned long addr,
  * mm	'mm_struct' for the given virtual address space
  * r	the region to be checked
  */
-static void __damon_va_check_access(struct mm_struct *mm,
+static void __damon_va_basic_check_access(struct mm_struct *mm,
 				struct damon_region *r, bool same_target,
 				struct damon_attrs *attrs)
 {
@@ -565,7 +566,7 @@ static void __damon_va_check_access(struct mm_struct *mm,
 	last_addr = r->sampling_addr;
 }
 
-static unsigned int damon_va_check_accesses(struct damon_ctx *ctx)
+static unsigned int damon_va_basic_check_accesses(struct damon_ctx *ctx)
 {
 	struct damon_target *t;
 	struct mm_struct *mm;
@@ -577,7 +578,7 @@ static unsigned int damon_va_check_accesses(struct damon_ctx *ctx)
 		mm = damon_get_mm(t);
 		same_target = false;
 		damon_for_each_region(r, t) {
-			__damon_va_check_access(mm, r, same_target,
+			__damon_va_basic_check_access(mm, r, same_target,
 					&ctx->attrs);
 			max_nr_accesses = max(r->nr_accesses, max_nr_accesses);
 			same_target = true;
@@ -1023,6 +1024,63 @@ struct damon_perf_buffer {
 	unsigned long size;
 };
 
+struct damon_vaddr_histogram_per_target {
+	struct xarray accesses;
+};
+
+static void damon_vaddr_histogram_init(struct damon_vaddr_histogram *histogram)
+{
+	xa_init(&histogram->targets);
+}
+
+static void damon_vaddr_histogram_add(struct damon_vaddr_histogram *histogram, u32 pid,
+						u64 vaddr)
+{
+	struct damon_vaddr_histogram_per_target *target;
+	unsigned long nr_accesses;
+
+	while (!(target = xa_load(&histogram->targets, pid))) {
+		target = kmalloc(sizeof(*target), GFP_KERNEL);
+		if (!target)
+			return;
+
+		xa_init(&target->accesses);
+
+		if (xa_err(xa_store(&histogram->targets, pid, target, GFP_KERNEL))) {
+			pr_warn_once("Failed to store target histogram\n");
+			kfree(target);
+			return;
+		}
+	}
+
+	nr_accesses = xa_to_value(xa_load(&target->accesses, vaddr));
+	xa_store(&target->accesses, vaddr, xa_mk_value(nr_accesses + 1), GFP_KERNEL);
+}
+
+static unsigned long damon_vaddr_histogram_count(struct damon_vaddr_histogram *histogram,
+							u32 pid, u64 vaddr)
+{
+	struct damon_vaddr_histogram_per_target *target;
+	unsigned long nr_accesses = 0;
+
+	target = xa_load(&histogram->targets, pid);
+	if (target)
+		nr_accesses = xa_to_value(xa_load(&target->accesses, vaddr));
+
+	return nr_accesses;
+}
+
+static void damon_vaddr_histogram_destroy(struct damon_vaddr_histogram *histogram)
+{
+	unsigned long index;
+	struct damon_vaddr_histogram_per_target *target;
+
+	xa_for_each(&histogram->targets, index, target)
+		xa_destroy(&target->accesses);
+
+	xa_destroy(&histogram->targets);
+}
+
 static void damon_perf_overflow(struct perf_event *perf_event, struct perf_sample_data *data,
 				struct pt_regs *regs)
 {
@@ -1167,6 +1225,298 @@ void damon_perf_prepare_access_checks(struct damon_ctx *ctx,
 	}
 }
 
+static void damon_va_perf_check_accesses_by_vaddr(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+	struct damon_perf *perf = event->priv;
+	struct damon_target *t;
+	int cpu;
+	unsigned int tidx = 0;
+
+	if (!perf)
+		return;
+
+	damon_vaddr_histogram_init(&perf->vaddr_histogram);
+
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event = per_cpu(*perf->event, cpu);
+		struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, cpu);
+		unsigned long head, tail, count, i;
+
+		if (!perf_event)
+			continue;
+
+		perf_event_disable(perf_event);
+
+		head = smp_load_acquire(&buffer->head);
+		tail = buffer->tail;
+		count = CIRC_CNT(head, tail, buffer->size);
+
+		for (i = 0; i < count; i++) {
+			struct damon_perf_record *record =
+				&buffer->records[(tail + i) & (buffer->size - 1)];
+
+			damon_vaddr_histogram_add(&perf->vaddr_histogram, record->pid,
+							record->addr & PAGE_MASK);
+		}
+		smp_store_release(&buffer->tail, (tail + count) & (buffer->size - 1));
+
+		if ((count == buffer->size - 1) && (buffer->size < DAMON_PERF_MAX_RECORDS)) {
+			void *new_records = kvcalloc_node(buffer->size * 2,
+					sizeof(buffer->records[0]), GFP_KERNEL,
+					cpu_to_node(cpu));
+
+			if (new_records) {
+				kvfree(buffer->records);
+				buffer->records = new_records;
+				buffer->head = 0;
+				buffer->tail = 0;
+				buffer->size *= 2;
+			}
+		}
+	}
+
+	damon_for_each_target(t, ctx) {
+		struct damon_region *r;
+		u32 pid = pid_nr(t->pid);
+		unsigned int nr_accessed = 0;
+
+		damon_for_each_region(r, t) {
+			unsigned long addr;
+
+			if (r->accessed)
+				continue;
+
+			for (addr = r->ar.start; addr < r->ar.end; addr += PAGE_SIZE) {
+				if (damon_vaddr_histogram_count(&perf->vaddr_histogram, pid,
+									addr & PAGE_MASK)) {
+					r->accessed = true;
+					nr_accessed++;
+					break;
+				}
+			}
+		}
+		tidx++;
+	}
+
+	damon_vaddr_histogram_destroy(&perf->vaddr_histogram);
+}
+
+struct damon_paddr_walk {
+	struct damon_paddr_histogram *histogram;
+	bool accessed;
+};
+
+static void damon_paddr_histogram_add(struct damon_paddr_histogram *histogram, u64 paddr);
+static const struct mm_walk_ops damon_paddr_ops;
+
+void damon_perf_populate_paddr_histogram(struct damon_ctx *ctx, struct damon_perf_event *event)
+{
+	struct damon_perf *perf = event->priv;
+	int cpu;
+
+	if (!perf)
+		return;
+
+	for_each_possible_cpu(cpu) {
+		struct perf_event *perf_event = per_cpu(*perf->event, cpu);
+		struct damon_perf_buffer *buffer = per_cpu_ptr(perf->buffer, cpu);
+		unsigned long head, tail, count, i;
+
+		if (!perf_event)
+			continue;
+
+		perf_event_disable(perf_event);
+
+		head = smp_load_acquire(&buffer->head);
+		tail = buffer->tail;
+		count = CIRC_CNT(head, tail, buffer->size);
+
+		for (i = 0; i < count; i++) {
+			struct damon_perf_record *record =
+				&buffer->records[(tail + i) & (buffer->size - 1)];
+
+			damon_paddr_histogram_add(&perf->paddr_histogram,
+							record->phys_addr & PAGE_MASK);
+		}
+		smp_store_release(&buffer->tail, (tail + count) & (buffer->size - 1));
+
+		if ((count == buffer->size - 1) && (buffer->size < DAMON_PERF_MAX_RECORDS)) {
+			void *new_records = kvcalloc_node(buffer->size * 2,
+					sizeof(buffer->records[0]), GFP_KERNEL,
+					cpu_to_node(cpu));
+
+			if (new_records) {
+				kvfree(buffer->records);
+				buffer->records = new_records;
+				buffer->head = 0;
+				buffer->tail = 0;
+				buffer->size *= 2;
+			}
+		}
+	}
+}
+
+static void damon_va_perf_check_accesses_by_paddr(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+	struct damon_perf *perf = event->priv;
+	struct damon_target *t;
+	unsigned int tidx = 0;
+
+	if (!perf)
+		return;
+
+	damon_paddr_histogram_init(&perf->paddr_histogram);
+
+	damon_perf_populate_paddr_histogram(ctx, event);
+
+	damon_for_each_target(t, ctx) {
+		struct damon_region *r;
+		struct mm_struct *mm = damon_get_mm(t);
+		unsigned int nr_accessed = 0;
+
+		if (!mm)
+			continue;
+
+		mmap_read_lock(mm);
+		damon_for_each_region(r, t) {
+			struct damon_paddr_walk walk_private = {
+				.histogram = &perf->paddr_histogram,
+				.accessed = false,
+			};
+
+			if (r->accessed)
+				continue;
+
+			walk_page_range(mm, r->ar.start, r->ar.end, &damon_paddr_ops,
+					&walk_private);
+			if (walk_private.accessed) {
+				r->accessed = true;
+				nr_accessed++;
+			}
+		}
+		mmap_read_unlock(mm);
+		mmput(mm);
+		tidx++;
+	}
+
+	damon_paddr_histogram_destroy(&perf->paddr_histogram);
+}
+
+static void damon_va_perf_check_accesses(struct damon_ctx *ctx, struct damon_perf_event *event)
+{
+	if (event->attr.sample_phys_addr)
+		return damon_va_perf_check_accesses_by_paddr(ctx, event);
+	else
+		return damon_va_perf_check_accesses_by_vaddr(ctx, event);
+}
+
+void damon_paddr_histogram_init(struct damon_paddr_histogram *histogram)
+{
+	xa_init(&histogram->accesses);
+}
+
+static void damon_paddr_histogram_add(struct damon_paddr_histogram *histogram,
+						u64 paddr)
+{
+	unsigned long nr_accesses;
+
+	nr_accesses = xa_to_value(xa_load(&histogram->accesses, paddr));
+	xa_store(&histogram->accesses, paddr, xa_mk_value(nr_accesses + 1), GFP_KERNEL);
+}
+
+unsigned long damon_paddr_histogram_count(struct damon_paddr_histogram *histogram, u64 paddr)
+{
+	return xa_to_value(xa_load(&histogram->accesses, paddr));
+}
+
+void damon_paddr_histogram_destroy(struct damon_paddr_histogram *histogram)
+{
+	xa_destroy(&histogram->accesses);
+}
+
+static int damon_paddr_pmd_entry(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk)
+{
+	pte_t *pte;
+	spinlock_t *ptl;
+	struct damon_paddr_walk *paddr_walk = walk->private;
+
+	ptl = pmd_trans_huge_lock(pmd, walk->vma);
+	if (ptl) {
+		pmd_t pmde = pmdp_get(pmd);
+
+		if (pmd_present(pmde)) {
+			for (; addr < next && !paddr_walk->accessed; addr += PAGE_SIZE) {
+				u64 frame = pmd_pfn(pmde) +
+					((addr & ~HPAGE_PMD_MASK) >> PAGE_SHIFT);
+
+				if (damon_paddr_histogram_count(paddr_walk->histogram,
+						PFN_PHYS(frame))) {
+					paddr_walk->accessed = true;
+					break;
+				}
+			}
+		}
+		spin_unlock(ptl);
+		return paddr_walk->accessed ? 1 : 0;
+	}
+
+	pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
+	if (!pte) {
+		walk->action = ACTION_AGAIN;
+		return 0;
+	}
+
+	for (; addr < next && !paddr_walk->accessed; pte++, addr += PAGE_SIZE) {
+		pte_t ptent = ptep_get(pte);
+
+		if (pte_present(ptent)) {
+			if (damon_paddr_histogram_count(paddr_walk->histogram,
+					PFN_PHYS(pte_pfn(ptent)))) {
+				paddr_walk->accessed = true;
+			}
+		}
+	}
+
+	pte_unmap_unlock(pte - 1, ptl);
+
+	return paddr_walk->accessed ? 1 : 0;
+}
+
+#ifdef CONFIG_HUGETLB_PAGE
+static int damon_paddr_hugetlb_entry(pte_t *pte, unsigned long hmask,
+		unsigned long addr, unsigned long end,
+		struct mm_walk *walk)
+{
+	struct damon_paddr_walk *paddr_walk = walk->private;
+	pte_t entry = huge_ptep_get(walk->mm, addr, pte);
+
+	if (pte_present(entry)) {
+		for (; addr < end; addr += PAGE_SIZE) {
+			u64 frame = pte_pfn(entry) + ((addr & ~hmask) >> PAGE_SHIFT);
+
+			if (damon_paddr_histogram_count(paddr_walk->histogram,
+						PFN_PHYS(frame))) {
+				paddr_walk->accessed = true;
+				break;
+			}
+		}
+	}
+
+	return paddr_walk->accessed ? 1 : 0;
+}
+#else
+#define damon_perf_hugetlb_entry NULL
+#endif /* CONFIG_HUGETLB_PAGE */
+
+static const struct mm_walk_ops damon_paddr_ops = {
+	.pmd_entry = damon_paddr_pmd_entry,
+	.hugetlb_entry = damon_paddr_hugetlb_entry,
+	.walk_lock = PGWALK_RDLOCK,
+};
+
 #else
 
 static inline int damon_perf_init(struct damon_ctx *ctx, struct damon_perf_event *event)
@@ -1204,6 +1554,50 @@ static void damon_va_init(struct damon_ctx *ctx)
 
 	if (ctx->ops.id == DAMON_OPS_VADDR)
 		damon_va_init_regions(ctx);
+}
+
+static void damon_va_prepare_access_checks(struct damon_ctx *ctx)
+{
+	struct damon_perf_event *event;
+
+	if (list_empty(&ctx->perf_events))
+		return damon_va_basic_prepare_access_checks(ctx);
+
+	list_for_each_entry(event, &ctx->perf_events, list) {
+		damon_perf_prepare_access_checks(ctx, event);
+	}
+}
+
+static unsigned int damon_va_check_accesses(struct damon_ctx *ctx)
+{
+	struct damon_target *t;
+	struct damon_perf_event *event;
+	unsigned int max_nr_accesses = 0;
+
+	if (list_empty(&ctx->perf_events))
+		return damon_va_basic_check_accesses(ctx);
+
+	damon_for_each_target(t, ctx) {
+		struct damon_region *r;
+
+		damon_for_each_region(r, t)
+			r->accessed = false;
+	}
+
+	list_for_each_entry(event, &ctx->perf_events, list) {
+		damon_va_perf_check_accesses(ctx, event);
+	}
+
+	damon_for_each_target(t, ctx) {
+		struct damon_region *r;
+
+		damon_for_each_region(r, t) {
+			damon_update_region_access_rate(r, r->accessed, &ctx->attrs);
+			max_nr_accesses = max(r->nr_accesses, max_nr_accesses);
+		}
+	}
+
+	return max_nr_accesses;
 }
 
 void damon_ops_cleanup(struct damon_ctx *ctx)
