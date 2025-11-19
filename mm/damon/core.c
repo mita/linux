@@ -172,9 +172,10 @@ static bool damon_intersect(struct damon_region *r,
  * Fill holes in regions with new regions.
  */
 static int damon_fill_regions_holes(struct damon_region *first,
-		struct damon_region *last, struct damon_target *t)
+		struct damon_region *last, struct damon_target *t, bool split)
 {
 	struct damon_region *r = first;
+	unsigned long max_region_sz = split ? t->max_region_sz : 0;
 
 	damon_for_each_region_from(r, t) {
 		struct damon_region *next, *newr;
@@ -187,6 +188,8 @@ static int damon_fill_regions_holes(struct damon_region *first,
 			if (!newr)
 				return -ENOMEM;
 			damon_insert_region(newr, r, next, t);
+			if (max_region_sz)
+				damon_evenly_split_region(t, newr, -1, max_region_sz);
 		}
 	}
 	return 0;
@@ -198,6 +201,7 @@ static int damon_fill_regions_holes(struct damon_region *first,
  * @ranges:	array of new monitoring target ranges.
  * @nr_ranges:	length of @ranges.
  * @min_sz_region:	minimum region size.
+ * @split:	split a new region into small regions
  *
  * This function adds new regions to, or modify existing regions of a
  * monitoring target to fit in specific ranges.
@@ -205,9 +209,12 @@ static int damon_fill_regions_holes(struct damon_region *first,
  * Return: 0 if success, or negative error code otherwise.
  */
 int damon_set_regions(struct damon_target *t, struct damon_addr_range *ranges,
-		unsigned int nr_ranges, unsigned long min_sz_region)
+		unsigned int nr_ranges, unsigned long min_sz_region, bool split)
 {
 	struct damon_region *r, *next;
+	unsigned long min_region_sz = max(min_sz_region, t->min_region_sz);
+	unsigned long max_region_sz = split ? t->max_region_sz : 0;
+	unsigned long orig_start, orig_end;
 	unsigned int i;
 	int err;
 
@@ -242,19 +249,34 @@ int damon_set_regions(struct damon_target *t, struct damon_addr_range *ranges,
 			/* no region intersects with this range */
 			newr = damon_new_region(
 					ALIGN_DOWN(range->start,
-						min_sz_region),
-					ALIGN(range->end, min_sz_region));
+						min_region_sz),
+					ALIGN(range->end, min_region_sz));
 			if (!newr)
 				return -ENOMEM;
 			damon_insert_region(newr, damon_prev_region(r), r, t);
+			if (max_region_sz)
+				damon_evenly_split_region(t, newr, -1, max_region_sz);
 		} else {
 			/* resize intersecting regions to fit in this range */
+			orig_start = first->ar.start;
 			first->ar.start = ALIGN_DOWN(range->start,
-					min_sz_region);
-			last->ar.end = ALIGN(range->end, min_sz_region);
+					min_region_sz);
+			orig_end = last->ar.end;
+			last->ar.end = ALIGN(range->end, min_region_sz);
+			if (first->ar.start < orig_start) {
+				if (max_region_sz)
+					damon_evenly_split_region(t, first, -1, max_region_sz);
+				if (first == last)
+					continue;
+			}
+
+			if (orig_end < last->ar.end) {
+				if (max_region_sz)
+					damon_evenly_split_region(t, last, -1, max_region_sz);
+			}
 
 			/* fill possible holes in the range */
-			err = damon_fill_regions_holes(first, last, t);
+			err = damon_fill_regions_holes(first, last, t, split);
 			if (err)
 				return err;
 		}
@@ -472,6 +494,8 @@ struct damon_target *damon_new_target(void)
 
 	t->pid = NULL;
 	t->nr_regions = 0;
+	t->min_region_sz = 0;
+	t->max_region_sz = 0;
 	INIT_LIST_HEAD(&t->regions_list);
 	INIT_LIST_HEAD(&t->list);
 	t->obsolete = false;
@@ -1161,7 +1185,7 @@ static int damon_commit_target_regions(struct damon_target *dst,
 	i = 0;
 	damon_for_each_region(src_region, src)
 		ranges[i++] = src_region->ar;
-	err = damon_set_regions(dst, ranges, i, src_min_sz_region);
+	err = damon_set_regions(dst, ranges, i, src_min_sz_region, true);
 	kfree(ranges);
 	return err;
 }
@@ -1181,6 +1205,25 @@ static int damon_commit_target(
 	if (src_has_pid)
 		get_pid(src->pid);
 	dst->pid = src->pid;
+	dst->min_region_sz = src->min_region_sz;
+	dst->max_region_sz = src->max_region_sz;
+	if (dst->min_region_sz > dst->max_region_sz) {
+		pr_debug("invalid min_region_sz=%lu and max_region_sz=%lu\n",
+				dst->min_region_sz, dst->max_region_sz);
+		dst->min_region_sz = dst->max_region_sz = 0;
+	}
+	if (dst->min_region_sz) {
+		if (dst->min_region_sz < DAMON_MIN_REGION || !is_power_of_2(dst->min_region_sz)) {
+			pr_debug("invalid min_region_sz=%lu\n", dst->min_region_sz);
+			dst->min_region_sz = dst->max_region_sz = 0;
+		}
+	}
+	if (dst->max_region_sz) {
+		if (dst->max_region_sz < DAMON_MIN_REGION || !is_power_of_2(dst->max_region_sz)) {
+			pr_debug("invalid max_region_sz=%lu\n", dst->max_region_sz);
+			dst->min_region_sz = dst->max_region_sz = 0;
+		}
+	}
 	return 0;
 }
 
@@ -1713,6 +1756,7 @@ static bool damos_skip_charged_region(struct damon_target *t,
 {
 	struct damon_region *r = *rp;
 	struct damos_quota *quota = &s->quota;
+	unsigned long min_region_sz = max(min_sz_region, t->min_region_sz);
 	unsigned long sz_to_skip;
 
 	/* Skip previously charged regions */
@@ -1731,11 +1775,11 @@ static bool damos_skip_charged_region(struct damon_target *t,
 		if (quota->charge_addr_from && r->ar.start <
 				quota->charge_addr_from) {
 			sz_to_skip = ALIGN_DOWN(quota->charge_addr_from -
-					r->ar.start, min_sz_region);
+					r->ar.start, min_region_sz);
 			if (!sz_to_skip) {
-				if (damon_sz_region(r) <= min_sz_region)
+				if (damon_sz_region(r) <= min_region_sz)
 					return true;
-				sz_to_skip = min_sz_region;
+				sz_to_skip = min_region_sz;
 			}
 			damon_split_region_at(t, r, sz_to_skip);
 			r = damon_next_region(r);
@@ -1766,6 +1810,7 @@ static bool damos_filter_match(struct damon_ctx *ctx, struct damon_target *t,
 	bool matched = false;
 	struct damon_target *ti;
 	int target_idx = 0;
+	unsigned long min_region_sz = max(min_sz_region, t->min_region_sz);
 	unsigned long start, end;
 
 	switch (filter->type) {
@@ -1778,8 +1823,8 @@ static bool damos_filter_match(struct damon_ctx *ctx, struct damon_target *t,
 		matched = target_idx == filter->target_idx;
 		break;
 	case DAMOS_FILTER_TYPE_ADDR:
-		start = ALIGN_DOWN(filter->addr_range.start, min_sz_region);
-		end = ALIGN_DOWN(filter->addr_range.end, min_sz_region);
+		start = ALIGN_DOWN(filter->addr_range.start, min_region_sz);
+		end = ALIGN_DOWN(filter->addr_range.end, min_region_sz);
 
 		/* inside the range */
 		if (start <= r->ar.start && r->ar.end <= end) {
@@ -1917,6 +1962,7 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 	struct damos_quota *quota = &s->quota;
 	unsigned long sz = damon_sz_region(r);
 	struct timespec64 begin, end;
+	unsigned long min_region_sz = max(c->min_sz_region, t->min_region_sz);
 	unsigned long sz_applied = 0;
 	unsigned long sz_ops_filter_passed = 0;
 	/*
@@ -1950,7 +1996,7 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 	if (c->ops.apply_scheme) {
 		if (quota->esz && quota->charged_sz + sz > quota->esz) {
 			sz = ALIGN_DOWN(quota->esz - quota->charged_sz,
-					c->min_sz_region);
+					min_region_sz);
 			if (!sz)
 				goto update_stat;
 			damon_split_region_at(t, r, sz);
@@ -2379,6 +2425,14 @@ static void damon_merge_regions_of(struct damon_target *t, unsigned int thres,
 	}
 }
 
+static bool damon_adaptive_region_adjustment_is_enabled(struct damon_target *t)
+{
+	if (!t->min_region_sz || !t->max_region_sz)
+		return true;
+
+	return t->min_region_sz != t->max_region_sz;
+}
+
 /*
  * Merge adjacent regions having similar access frequencies
  *
@@ -2402,17 +2456,28 @@ static void kdamond_merge_regions(struct damon_ctx *c, unsigned int threshold,
 	struct damon_target *t;
 	unsigned int nr_regions;
 	unsigned int max_thres;
+	bool might_merge = false;
 
 	max_thres = c->attrs.aggr_interval /
 		(c->attrs.sample_interval ?  c->attrs.sample_interval : 1);
 	do {
 		nr_regions = 0;
 		damon_for_each_target(t, c) {
-			damon_merge_regions_of(t, threshold, sz_limit);
+			unsigned long target_sz_limit = max(sz_limit, t->min_region_sz);
+
+			if (t->max_region_sz)
+				target_sz_limit = min(sz_limit, t->max_region_sz);
+			if (damon_adaptive_region_adjustment_is_enabled(t))
+				might_merge = true;
+			else
+				target_sz_limit = 0;
+
+			damon_merge_regions_of(t, threshold, target_sz_limit);
 			nr_regions += damon_nr_regions(t);
 		}
 		threshold = max(1, threshold * 2);
 	} while (nr_regions > c->attrs.max_nr_regions &&
+			might_merge &&
 			threshold / 2 < max_thres);
 }
 
@@ -2446,6 +2511,7 @@ static void damon_split_regions_of(struct damon_target *t, int nr_subs,
 				  unsigned long min_sz_region)
 {
 	struct damon_region *r, *next;
+	unsigned long min_region_sz = max(min_sz_region, t->min_region_sz);
 	unsigned long sz_region, sz_sub = 0;
 	int i;
 
@@ -2453,16 +2519,19 @@ static void damon_split_regions_of(struct damon_target *t, int nr_subs,
 		sz_region = damon_sz_region(r);
 
 		for (i = 0; i < nr_subs - 1 &&
-				sz_region > 2 * min_sz_region; i++) {
+				sz_region > 2 * min_region_sz; i++) {
 			/*
 			 * Randomly select size of left sub-region to be at
 			 * least 10 percent and at most 90% of original region
 			 */
 			sz_sub = ALIGN_DOWN(damon_rand(1, 10) *
-					sz_region / 10, min_sz_region);
+					sz_region / 10, min_region_sz);
 			/* Do not allow blank region */
 			if (sz_sub == 0 || sz_sub >= sz_region)
 				continue;
+
+			if (t->max_region_sz)
+				sz_sub = min(sz_sub, t->max_region_sz);
 
 			damon_split_region_at(t, r, sz_sub);
 			sz_region = sz_sub;
@@ -2498,8 +2567,11 @@ static void kdamond_split_regions(struct damon_ctx *ctx)
 			nr_regions < ctx->attrs.max_nr_regions / 3)
 		nr_subregions = 3;
 
-	damon_for_each_target(t, ctx)
+	damon_for_each_target(t, ctx) {
+		if (!damon_adaptive_region_adjustment_is_enabled(t))
+			continue;
 		damon_split_regions_of(t, nr_subregions, ctx->min_sz_region);
+	}
 
 	last_nr_regions = nr_regions;
 }
@@ -2894,7 +2966,7 @@ int damon_set_region_biggest_system_ram_default(struct damon_target *t,
 
 	addr_range.start = *start;
 	addr_range.end = *end;
-	return damon_set_regions(t, &addr_range, 1, min_sz_region);
+	return damon_set_regions(t, &addr_range, 1, min_sz_region, true);
 }
 
 /*
@@ -2965,6 +3037,46 @@ void damon_update_region_access_rate(struct damon_region *r, bool accessed,
 
 	if (accessed)
 		r->nr_accesses++;
+}
+
+int damon_evenly_split_region(struct damon_target *t,
+		struct damon_region *r, unsigned int nr_pieces, unsigned long sz_piece)
+{
+	unsigned long sz_orig, orig_end;
+	struct damon_region *n = NULL, *next;
+	unsigned long start;
+	unsigned int i;
+
+	if (!r || !nr_pieces || !sz_piece)
+		return -EINVAL;
+
+	if (nr_pieces == 1)
+		return 0;
+
+	orig_end = r->ar.end;
+	sz_orig = damon_sz_region(r);
+
+	if (t->max_region_sz)
+		sz_piece = min(sz_piece, t->max_region_sz);
+
+	if (sz_orig <= sz_piece)
+		return 0;
+
+	r->ar.end = r->ar.start + sz_piece;
+	next = damon_next_region(r);
+	for (start = r->ar.end, i = 1; i < nr_pieces && start + sz_piece <= orig_end;
+			start += sz_piece, i++) {
+		n = damon_new_region(start, start + sz_piece);
+		if (!n)
+			return -ENOMEM;
+		damon_insert_region(n, r, next, t);
+		r = n;
+	}
+	/* complement last region for possible rounding error */
+	if (n)
+		n->ar.end = orig_end;
+
+	return 0;
 }
 
 /**

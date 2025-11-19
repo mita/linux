@@ -91,6 +91,8 @@ struct damon_region {
  * struct damon_target - Represents a monitoring target.
  * @pid:		The PID of the virtual address space to monitor.
  * @nr_regions:		Number of monitoring target regions of this target.
+ * @min_region_sz:	The minimum size of adaptive monitoring regions.
+ * @max_region_sz:	The maximum size of adaptive monitoring regions.
  * @regions_list:	Head of the monitoring target regions of this target.
  * @list:		List head for siblings.
  * @obsolete:		Whether the commit destination target is obsolete.
@@ -107,6 +109,8 @@ struct damon_region {
 struct damon_target {
 	struct pid *pid;
 	unsigned int nr_regions;
+	unsigned long min_region_sz;
+	unsigned long max_region_sz;
 	struct list_head regions_list;
 	struct list_head list;
 	bool obsolete;
@@ -935,7 +939,7 @@ static inline void damon_insert_region(struct damon_region *r,
 void damon_add_region(struct damon_region *r, struct damon_target *t);
 void damon_destroy_region(struct damon_region *r, struct damon_target *t);
 int damon_set_regions(struct damon_target *t, struct damon_addr_range *ranges,
-		unsigned int nr_ranges, unsigned long min_sz_region);
+		unsigned int nr_ranges, unsigned long min_sz_region, bool split);
 void damon_update_region_access_rate(struct damon_region *r, bool accessed,
 		struct damon_attrs *attrs);
 
@@ -1003,6 +1007,8 @@ int damos_walk(struct damon_ctx *ctx, struct damos_walk_control *control);
 int damon_set_region_biggest_system_ram_default(struct damon_target *t,
 				unsigned long *start, unsigned long *end,
 				unsigned long min_sz_region);
+int damon_evenly_split_region(struct damon_target *t,
+			struct damon_region *r, unsigned int nr_pieces, unsigned long sz_piece);
 
 #endif	/* CONFIG_DAMON */
 

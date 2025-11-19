@@ -65,6 +65,7 @@ failed:
  */
 static void damon_test_three_regions_in_vmas(struct kunit *test)
 {
+	struct damon_target *t = damon_new_target();
 	static struct mm_struct mm;
 	struct damon_addr_range regions[3] = {0};
 	/* 10-20-25, 200-210-220, 300-305, 307-330 */
@@ -81,7 +82,7 @@ static void damon_test_three_regions_in_vmas(struct kunit *test)
 	if (__link_vmas(&mm.mm_mt, vmas, ARRAY_SIZE(vmas)))
 		kunit_skip(test, "Failed to create VMA tree");
 
-	__damon_va_three_regions(&mm, regions);
+	__damon_va_three_regions(t, &mm, regions);
 
 	KUNIT_EXPECT_EQ(test, 10ul, regions[0].start);
 	KUNIT_EXPECT_EQ(test, 25ul, regions[0].end);
@@ -89,6 +90,8 @@ static void damon_test_three_regions_in_vmas(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, 220ul, regions[1].end);
 	KUNIT_EXPECT_EQ(test, 300ul, regions[2].start);
 	KUNIT_EXPECT_EQ(test, 330ul, regions[2].end);
+
+	damon_free_target(t);
 }
 
 static struct damon_region *__nth_region_of(struct damon_target *t, int idx)
@@ -147,7 +150,7 @@ static void damon_do_test_apply_three_regions(struct kunit *test,
 		damon_add_region(r, t);
 	}
 
-	damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION);
+	damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION, false);
 
 	for (i = 0; i < nr_expected / 2; i++) {
 		r = __nth_region_of(t, i);

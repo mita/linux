@@ -69,10 +69,8 @@ static struct mm_struct *damon_get_mm(struct damon_target *t)
 static int damon_va_evenly_split_region(struct damon_target *t,
 		struct damon_region *r, unsigned int nr_pieces)
 {
-	unsigned long sz_orig, sz_piece, orig_end;
-	struct damon_region *n = NULL, *next;
-	unsigned long start;
-	unsigned int i;
+	unsigned long sz_piece;
+	unsigned long min_region_sz = max(DAMON_MIN_REGION, t->min_region_sz);
 
 	if (!r || !nr_pieces)
 		return -EINVAL;
@@ -80,27 +78,12 @@ static int damon_va_evenly_split_region(struct damon_target *t,
 	if (nr_pieces == 1)
 		return 0;
 
-	orig_end = r->ar.end;
-	sz_orig = damon_sz_region(r);
-	sz_piece = ALIGN_DOWN(sz_orig / nr_pieces, DAMON_MIN_REGION);
+	sz_piece = ALIGN_DOWN(damon_sz_region(r) / nr_pieces, min_region_sz);
 
 	if (!sz_piece)
 		return -EINVAL;
 
-	r->ar.end = r->ar.start + sz_piece;
-	next = damon_next_region(r);
-	for (start = r->ar.end, i = 1; i < nr_pieces; start += sz_piece, i++) {
-		n = damon_new_region(start, start + sz_piece);
-		if (!n)
-			return -ENOMEM;
-		damon_insert_region(n, r, next, t);
-		r = n;
-	}
-	/* complement last region for possible rounding error */
-	if (n)
-		n->ar.end = orig_end;
-
-	return 0;
+	return damon_evenly_split_region(t, r, -1, sz_piece);
 }
 
 static unsigned long sz_range(struct damon_addr_range *r)
@@ -121,12 +104,13 @@ static unsigned long sz_range(struct damon_addr_range *r)
  *
  * Returns 0 if success, or negative error code otherwise.
  */
-static int __damon_va_three_regions(struct mm_struct *mm,
+static int __damon_va_three_regions(struct damon_target *t, struct mm_struct *mm,
 				       struct damon_addr_range regions[3])
 {
 	struct damon_addr_range first_gap = {0}, second_gap = {0};
 	VMA_ITERATOR(vmi, mm, 0);
 	struct vm_area_struct *vma, *prev = NULL;
+	unsigned long min_region_sz = max(DAMON_MIN_REGION, t->min_region_sz);
 	unsigned long start;
 
 	/*
@@ -157,20 +141,35 @@ next:
 	}
 	rcu_read_unlock();
 
-	if (!sz_range(&second_gap) || !sz_range(&first_gap))
+	if (!sz_range(&second_gap) || !sz_range(&first_gap)) {
+		pr_warn_once("The size of the first and second gaps are %lu and %lu\n",
+				sz_range(&first_gap), sz_range(&second_gap));
 		return -EINVAL;
+	}
 
 	/* Sort the two biggest gaps by address */
 	if (first_gap.start > second_gap.start)
 		swap(first_gap, second_gap);
 
 	/* Store the result */
-	regions[0].start = ALIGN(start, DAMON_MIN_REGION);
-	regions[0].end = ALIGN(first_gap.start, DAMON_MIN_REGION);
-	regions[1].start = ALIGN(first_gap.end, DAMON_MIN_REGION);
-	regions[1].end = ALIGN(second_gap.start, DAMON_MIN_REGION);
-	regions[2].start = ALIGN(second_gap.end, DAMON_MIN_REGION);
-	regions[2].end = ALIGN(prev->vm_end, DAMON_MIN_REGION);
+	regions[0].start = ALIGN_DOWN(start, min_region_sz);
+	regions[0].end = ALIGN(first_gap.start, min_region_sz);
+	regions[1].start = ALIGN_DOWN(first_gap.end, min_region_sz);
+	regions[1].end = ALIGN(second_gap.start, min_region_sz);
+	regions[2].start = ALIGN_DOWN(second_gap.end, min_region_sz);
+	regions[2].end = ALIGN(prev->vm_end, min_region_sz);
+
+	for (int i = 0; i < 3; i++) {
+		if (!sz_range(&regions[i])) {
+			pr_warn_once("The size of the %dth range is %lu\n",
+					i, sz_range(&regions[i]));
+			return -EINVAL;
+		}
+		if (i > 0 && regions[i - 1].end >= regions[i].start) {
+			pr_warn_once("%dth and %dth regions overlap\n", i - 1, i);
+			return -EINVAL;
+		}
+	}
 
 	return 0;
 }
@@ -191,7 +190,7 @@ static int damon_va_three_regions(struct damon_target *t,
 		return -EINVAL;
 
 	mmap_read_lock(mm);
-	rc = __damon_va_three_regions(mm, regions);
+	rc = __damon_va_three_regions(t, mm, regions);
 	mmap_read_unlock(mm);
 
 	mmput(mm);
@@ -246,6 +245,7 @@ static void __damon_va_init_regions(struct damon_ctx *ctx,
 	struct damon_target *ti;
 	struct damon_region *r;
 	struct damon_addr_range regions[3];
+	unsigned long min_region_sz = max(DAMON_MIN_REGION, t->min_region_sz);
 	unsigned long sz = 0, nr_pieces;
 	int i, tidx = 0;
 
@@ -263,8 +263,10 @@ static void __damon_va_init_regions(struct damon_ctx *ctx,
 		sz += regions[i].end - regions[i].start;
 	if (ctx->attrs.min_nr_regions)
 		sz /= ctx->attrs.min_nr_regions;
-	if (sz < DAMON_MIN_REGION)
-		sz = DAMON_MIN_REGION;
+	if (t->max_region_sz)
+		sz = clamp(sz, min_region_sz, t->max_region_sz);
+	else
+		sz = max(sz, min_region_sz);
 
 	/* Set the initial three regions of the target */
 	for (i = 0; i < 3; i++) {
@@ -303,7 +305,7 @@ static void damon_va_update(struct damon_ctx *ctx)
 	damon_for_each_target(t, ctx) {
 		if (damon_va_three_regions(t, three_regions))
 			continue;
-		damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION);
+		damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION, true);
 	}
 }
 

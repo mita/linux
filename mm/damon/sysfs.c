@@ -211,6 +211,7 @@ static const struct kobj_type damon_sysfs_regions_ktype = {
 struct damon_sysfs_target {
 	struct kobject kobj;
 	struct damon_sysfs_regions *regions;
+	struct damon_sysfs_ul_range *region_sz_range;
 	int pid;
 	bool obsolete;
 };
@@ -223,6 +224,7 @@ static struct damon_sysfs_target *damon_sysfs_target_alloc(void)
 static int damon_sysfs_target_add_dirs(struct damon_sysfs_target *target)
 {
 	struct damon_sysfs_regions *regions = damon_sysfs_regions_alloc();
+	struct damon_sysfs_ul_range *region_sz_range;
 	int err;
 
 	if (!regions)
@@ -231,14 +233,35 @@ static int damon_sysfs_target_add_dirs(struct damon_sysfs_target *target)
 	err = kobject_init_and_add(&regions->kobj, &damon_sysfs_regions_ktype,
 			&target->kobj, "regions");
 	if (err)
-		kobject_put(&regions->kobj);
+		goto put_regions_out;
 	else
 		target->regions = regions;
+
+	region_sz_range = damon_sysfs_ul_range_alloc(0, 0);
+	if (!region_sz_range) {
+		err = -ENOMEM;
+		goto put_regions_out;
+	}
+
+	err = kobject_init_and_add(&region_sz_range->kobj,
+			&damon_sysfs_ul_range_ktype, &target->kobj, "region_sz");
+	if (err)
+		goto put_region_sz_out;
+	target->region_sz_range = region_sz_range;
+	return 0;
+
+put_region_sz_out:
+	kobject_put(&region_sz_range->kobj);
+	target->region_sz_range = NULL;
+put_regions_out:
+	kobject_put(&regions->kobj);
+	target->regions = NULL;
 	return err;
 }
 
 static void damon_sysfs_target_rm_dirs(struct damon_sysfs_target *target)
 {
+	kobject_put(&target->region_sz_range->kobj);
 	damon_sysfs_regions_rm_dirs(target->regions);
 	kobject_put(&target->regions->kobj);
 }
@@ -1714,7 +1737,7 @@ static int damon_sysfs_set_regions(struct damon_target *t,
 		if (ranges[i - 1].end > ranges[i].start)
 			goto out;
 	}
-	err = damon_set_regions(t, ranges, sysfs_regions->nr, min_sz_region);
+	err = damon_set_regions(t, ranges, sysfs_regions->nr, min_sz_region, true);
 out:
 	kfree(ranges);
 	return err;
@@ -1736,6 +1759,8 @@ static int damon_sysfs_add_target(struct damon_sysfs_target *sys_target,
 			return -EINVAL;
 	}
 	t->obsolete = sys_target->obsolete;
+	t->min_region_sz = sys_target->region_sz_range->min;
+	t->max_region_sz = sys_target->region_sz_range->max;
 	return damon_sysfs_set_regions(t, sys_target->regions, ctx->min_sz_region);
 }
 

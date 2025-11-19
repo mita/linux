@@ -558,6 +558,9 @@ Description:	Reading this file returns the size of the memory in the region
 		that passed DAMON operations layer-handled filters of the
 		scheme in bytes.
 
+What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/targets/<T>/region_sz/min
+What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/targets/<T>/region_sz/max
+
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/perf_events/nr_perf_events
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/perf_events/<P>/type
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/perf_events/<P>/config
