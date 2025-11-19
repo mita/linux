@@ -458,9 +458,13 @@ static void damos_set_next_apply_sis(struct damos *s, struct damon_ctx *ctx)
 		ctx->attrs.sample_interval : 1;
 	unsigned long apply_interval = s->apply_interval_us ?
 		s->apply_interval_us : ctx->attrs.aggr_interval;
+	unsigned long next_apply_sis;
 
-	s->next_apply_sis = ctx->passed_sample_intervals +
+	next_apply_sis = ctx->passed_sample_intervals +
 		apply_interval / sample_interval;
+	if (s->next_apply_sis < ctx->passed_sample_intervals ||
+	    next_apply_sis < s->next_apply_sis)
+		s->next_apply_sis = next_apply_sis;
 }
 
 void damon_add_scheme(struct damon_ctx *ctx, struct damos *s)
@@ -800,6 +804,7 @@ int damon_set_attrs(struct damon_ctx *ctx, struct damon_attrs *attrs)
 	struct damos *s;
 	bool aggregating = ctx->passed_sample_intervals <
 		ctx->next_aggregation_sis;
+	unsigned long next_aggregation_sis, next_ops_update_sis;
 
 	if (!damon_valid_intervals_goal(attrs))
 		return -EINVAL;
@@ -815,10 +820,16 @@ int damon_set_attrs(struct damon_ctx *ctx, struct damon_attrs *attrs)
 	if (!attrs->aggr_samples)
 		attrs->aggr_samples = attrs->aggr_interval / sample_interval;
 
-	ctx->next_aggregation_sis = ctx->passed_sample_intervals +
+	next_aggregation_sis = ctx->passed_sample_intervals +
 		attrs->aggr_interval / sample_interval;
-	ctx->next_ops_update_sis = ctx->passed_sample_intervals +
+	if (ctx->next_aggregation_sis < ctx->passed_sample_intervals ||
+	    next_aggregation_sis < ctx->next_aggregation_sis)
+		ctx->next_aggregation_sis = next_aggregation_sis;
+	next_ops_update_sis = ctx->passed_sample_intervals +
 		attrs->ops_update_interval / sample_interval;
+	if (ctx->next_ops_update_sis < ctx->passed_sample_intervals ||
+	    next_ops_update_sis < ctx->next_ops_update_sis)
+		ctx->next_ops_update_sis = next_ops_update_sis;
 
 	damon_update_monitoring_results(ctx, attrs, aggregating);
 	ctx->attrs = *attrs;
@@ -1250,14 +1261,14 @@ static int damon_commit_target_regions(struct damon_target *dst,
 	if (!i)
 		return 0;
 
-	ranges = kmalloc_objs(*ranges, i, GFP_KERNEL | __GFP_NOWARN);
+	ranges = kvmalloc_objs(*ranges, i, GFP_KERNEL | __GFP_NOWARN);
 	if (!ranges)
 		return -ENOMEM;
 	i = 0;
 	damon_for_each_region(src_region, src)
 		ranges[i++] = src_region->ar;
 	err = damon_set_regions(dst, ranges, i, src_min_region_sz);
-	kfree(ranges);
+	kvfree(ranges);
 	return err;
 }
 
@@ -1375,6 +1386,8 @@ out:
 	return err;
 }
 
+static unsigned long damon_apply_min_nr_regions(struct damon_ctx *ctx);
+
 /**
  * damon_commit_ctx() - Commit parameters of a DAMON context to another.
  * @dst:	The commit destination DAMON context.
@@ -1422,6 +1435,11 @@ int damon_commit_ctx(struct damon_ctx *dst, struct damon_ctx *src)
 	dst->min_region_sz = src->min_region_sz;
 
 	dst->maybe_corrupted = false;
+	if (damon_is_running(dst)) {
+		if (dst->ops.init)
+			dst->ops.init(dst);
+		damon_apply_min_nr_regions(dst);
+	}
 	return 0;
 }
 
