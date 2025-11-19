@@ -548,6 +548,7 @@ struct damon_ctx *damon_new_ctx(void)
 	ctx->addr_unit = 1;
 	ctx->min_sz_region = DAMON_MIN_REGION;
 
+	INIT_LIST_HEAD(&ctx->perf_events);
 	INIT_LIST_HEAD(&ctx->adaptive_targets);
 	INIT_LIST_HEAD(&ctx->schemes);
 
@@ -570,6 +571,18 @@ void damon_destroy_ctx(struct damon_ctx *ctx)
 
 	damon_for_each_scheme_safe(s, next_s, ctx)
 		damon_destroy_scheme(s);
+
+	if (ctx->ops.cleanup)
+		ctx->ops.cleanup(ctx);
+
+	while (!list_empty(&ctx->perf_events)) {
+		struct damon_perf_event *event =
+			list_first_entry(&ctx->perf_events, typeof(*event), list);
+
+		WARN_ON(event->priv);
+		list_del(&event->list);
+		kfree(event);
+	}
 
 	kfree(ctx);
 }
@@ -1224,6 +1237,42 @@ static int damon_commit_targets(
 	return 0;
 }
 
+static int damon_commit_perf_events(struct damon_ctx *dst, struct damon_ctx *src)
+{
+	struct damon_perf_event *dst_event, *src_event, *new_event;
+
+	if (dst->ops.cleanup)
+		dst->ops.cleanup(dst);
+
+	while (!list_empty(&dst->perf_events)) {
+		dst_event = list_first_entry(&dst->perf_events, typeof(*dst_event), list);
+
+		WARN_ON(dst_event->priv);
+		list_del(&dst_event->list);
+		kfree(dst_event);
+	}
+
+	list_for_each_entry(src_event, &src->perf_events, list) {
+		new_event = kzalloc(sizeof(*new_event), GFP_KERNEL);
+		if (!new_event)
+			return -ENOMEM;
+
+		new_event->attr.type = src_event->attr.type;
+		new_event->attr.config = src_event->attr.config;
+		new_event->attr.config1 = src_event->attr.config1;
+		new_event->attr.config2 = src_event->attr.config2;
+		new_event->attr.sample_phys_addr = src_event->attr.sample_phys_addr;
+		new_event->attr.sample_freq = src_event->attr.sample_freq;
+
+		list_add_tail(&new_event->list, &dst->perf_events);
+	}
+
+	if (src->ops.init)
+		src->ops.init(dst);
+
+	return 0;
+}
+
 /**
  * damon_commit_ctx() - Commit parameters of a DAMON context to another.
  * @dst:	The commit destination DAMON context.
@@ -1245,6 +1294,9 @@ int damon_commit_ctx(struct damon_ctx *dst, struct damon_ctx *src)
 	if (err)
 		return err;
 	err = damon_commit_targets(dst, src);
+	if (err)
+		return err;
+	err = damon_commit_perf_events(dst, src);
 	if (err)
 		return err;
 	/*

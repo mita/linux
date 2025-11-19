@@ -370,12 +370,12 @@ static int __init damon_pa_initcall(void)
 {
 	struct damon_operations ops = {
 		.id = DAMON_OPS_PADDR,
-		.init = NULL,
+		.init = damon_ops_init,
 		.update = NULL,
 		.prepare_access_checks = damon_pa_prepare_access_checks,
 		.check_accesses = damon_pa_check_accesses,
 		.target_valid = NULL,
-		.cleanup = NULL,
+		.cleanup = damon_ops_cleanup,
 		.apply_scheme = damon_pa_apply_scheme,
 		.get_scheme_score = damon_pa_scheme_score,
 	};
