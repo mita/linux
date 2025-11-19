@@ -53,6 +53,10 @@ struct cxl_regs {
 		void __iomem *pmu;
 	);
 
+	struct_group_tagged(cxl_hmu_regs, hmu_regs,
+		void __iomem *hmu;
+	);
+
 	/*
 	 * RCH downstream port specific RAS register
 	 * @aer: CXL 3.0 8.2.1.1 RCH Downstream Port RCRB

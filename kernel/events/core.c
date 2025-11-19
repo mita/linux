@@ -10782,6 +10782,7 @@ int perf_event_overflow(struct perf_event *event,
 
 	return __perf_event_overflow(event, 1, data, regs);
 }
+EXPORT_SYMBOL_GPL(perf_event_overflow);
 
 /*
  * Generic software event infrastructure
