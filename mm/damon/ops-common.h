@@ -27,17 +27,41 @@ bool damos_ops_has_filter(struct damos *s);
 #ifdef CONFIG_PERF_EVENTS
 
 void damon_perf_prepare_access_checks(struct damon_ctx *ctx, struct damon_perf_event *event);
+void damon_va_perf_check_accesses(struct damon_ctx *ctx, struct damon_perf_event *event);
 int damon_perf_init(struct damon_ctx *ctx, struct damon_perf_event *event);
 void damon_perf_cleanup(struct damon_ctx *ctx, struct damon_perf_event *event);
+
+struct damon_vaddr_histogram {
+	struct xarray targets;
+};
+
+struct damon_paddr_histogram {
+	struct xarray accesses;
+};
 
 struct damon_perf {
 	struct perf_event * __percpu *event;
 	struct damon_perf_buffer __percpu *buffer;
+	union {
+		struct damon_vaddr_histogram vaddr_histogram;
+		struct damon_paddr_histogram paddr_histogram;
+	};
 };
+
+void damon_paddr_histogram_init(struct damon_paddr_histogram *histogram);
+unsigned long damon_paddr_histogram_count(struct damon_paddr_histogram *histogram, u64 paddr);
+void damon_paddr_histogram_destroy(struct damon_paddr_histogram *histogram);
+
+void damon_perf_populate_paddr_histogram(struct damon_ctx *ctx, struct damon_perf_event *event);
 
 #else /* CONFIG_PERF_EVENTS */
 
 static inline void damon_perf_prepare_access_checks(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+}
+
+static inline void damon_va_perf_check_accesses(struct damon_ctx *ctx,
 		struct damon_perf_event *event)
 {
 }

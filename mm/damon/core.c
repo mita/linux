@@ -3014,6 +3014,40 @@ static void kdamond_init_ctx(struct damon_ctx *ctx)
 	}
 }
 
+static void kdamond_prepare_perf_event_report(struct damon_ctx *ctx)
+{
+	struct damon_perf_event *event;
+
+	list_for_each_entry(event, &ctx->perf_events, list)
+		damon_perf_prepare_access_checks(ctx, event);
+}
+
+static unsigned int kdamond_check_perf_event_reported_accesses(struct damon_ctx *ctx)
+{
+	struct damon_target *t;
+	struct damon_perf_event *event;
+	unsigned int max_nr_accesses = 0;
+
+	if (damon_target_has_pid(ctx)) {
+		list_for_each_entry(event, &ctx->perf_events, list)
+			damon_va_perf_check_accesses(ctx, event);
+	}
+
+	damon_for_each_target(t, ctx) {
+		struct damon_region *r;
+
+		damon_for_each_region(r, t) {
+			if (r->access_reported)
+				r->access_reported = false;
+			else
+				damon_update_region_access_rate(r, false, &ctx->attrs);
+			max_nr_accesses = max(r->nr_accesses, max_nr_accesses);
+		}
+	}
+
+	return max_nr_accesses;
+}
+
 /*
  * The monitoring daemon that runs as a kernel thread
  */
@@ -3057,13 +3091,17 @@ static int kdamond_fn(void *data)
 		if (kdamond_wait_activation(ctx))
 			break;
 
-		if (ctx->ops.prepare_access_checks)
+		if (!list_empty(&ctx->perf_events))
+			kdamond_prepare_perf_event_report(ctx);
+		else if (ctx->ops.prepare_access_checks)
 			ctx->ops.prepare_access_checks(ctx);
 
 		kdamond_usleep(sample_interval);
 		ctx->passed_sample_intervals++;
 
-		if (ctx->ops.check_accesses)
+		if (!list_empty(&ctx->perf_events))
+			max_nr_accesses = kdamond_check_perf_event_reported_accesses(ctx);
+		else if (ctx->ops.check_accesses)
 			max_nr_accesses = ctx->ops.check_accesses(ctx);
 
 		if (time_after_eq(ctx->passed_sample_intervals,
