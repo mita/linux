@@ -3031,6 +3031,9 @@ static unsigned int kdamond_check_perf_event_reported_accesses(struct damon_ctx 
 	if (damon_target_has_pid(ctx)) {
 		list_for_each_entry(event, &ctx->perf_events, list)
 			damon_va_perf_check_accesses(ctx, event);
+	} else {
+		list_for_each_entry(event, &ctx->perf_events, list)
+			damon_pa_perf_check_accesses(ctx, event);
 	}
 
 	damon_for_each_target(t, ctx) {

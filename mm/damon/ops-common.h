@@ -28,6 +28,7 @@ bool damos_ops_has_filter(struct damos *s);
 
 void damon_perf_prepare_access_checks(struct damon_ctx *ctx, struct damon_perf_event *event);
 void damon_va_perf_check_accesses(struct damon_ctx *ctx, struct damon_perf_event *event);
+void damon_pa_perf_check_accesses(struct damon_ctx *ctx, struct damon_perf_event *event);
 int damon_perf_init(struct damon_ctx *ctx, struct damon_perf_event *event);
 void damon_perf_cleanup(struct damon_ctx *ctx, struct damon_perf_event *event);
 
@@ -62,6 +63,11 @@ static inline void damon_perf_prepare_access_checks(struct damon_ctx *ctx,
 }
 
 static inline void damon_va_perf_check_accesses(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+}
+
+static inline void damon_pa_perf_check_accesses(struct damon_ctx *ctx,
 		struct damon_perf_event *event)
 {
 }
