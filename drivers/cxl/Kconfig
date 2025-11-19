@@ -242,4 +242,10 @@ config CXL_ATL
 	depends on CXL_REGION
 	depends on ACPI_PRMT && AMD_NB
 
+config CXL_HMU
+       tristate "CXL: Hotness Monitoring Unit Driver"
+       depends on PERF_EVENTS
+       help
+	 Read data out from the CXL hotness units and provide it to userspace
+	 via the perf auxbuffer framework.
 endif

@@ -53,6 +53,7 @@
 #include "intel-bts.h"
 #include "arm-spe.h"
 #include "hisi-ptt.h"
+#include "cxl-hmu.h"
 #include "s390-cpumsf.h"
 #include "util/mmap.h"
 #include "powerpc-vpadtl.h"
@@ -1410,6 +1411,9 @@ int perf_event__process_auxtrace_info(const struct perf_tool *tool __maybe_unuse
 		break;
 	case PERF_AUXTRACE_VPA_DTL:
 		err = powerpc_vpadtl_process_auxtrace_info(event, session);
+		break;
+	case PERF_AUXTRACE_CXL_HMU:
+		err = cxl_hmu_process_auxtrace_info(event, session);
 		break;
 	case PERF_AUXTRACE_UNKNOWN:
 	default:
