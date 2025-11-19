@@ -413,6 +413,32 @@ int cxl_map_pmu_regs(struct cxl_register_map *map, struct cxl_pmu_regs *regs)
 }
 EXPORT_SYMBOL_NS_GPL(cxl_map_pmu_regs, "CXL");
 
+int cxl_map_hmu_regs(struct cxl_register_map *map, struct cxl_hmu_regs *regs)
+{
+	struct device *dev = map->host;
+	u64 __iomem *poke;
+	u64 common_cap[2];
+	resource_size_t phys_addr, phys_size;
+
+	phys_addr = map->resource;
+	/* Finding out the size of a CHMU means poking around inside */
+	poke = ioremap(phys_addr, sizeof(common_cap));
+	if (!poke) {
+		return -ENOMEM;
+	}
+	common_cap[0] = le64_to_cpu(readq(poke));
+	common_cap[1] = le64_to_cpu(readq(poke + 1));
+	iounmap(poke);
+	phys_size = FIELD_GET(CHMU_COMMON_CAP0_NUMINST_MSK, common_cap[0]) *
+		FIELD_GET(CHMU_COMMON_CAP1_INSTLEN_MSK, common_cap[1]) + 0x10;
+	regs->hmu = devm_cxl_iomap_block(dev, phys_addr, phys_size);
+	if (!regs->hmu)
+		return -ENOMEM;
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_map_hmu_regs, "CXL");
+
 static int cxl_map_regblock(struct cxl_register_map *map)
 {
 	struct device *host = map->host;

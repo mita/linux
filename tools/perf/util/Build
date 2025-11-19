@@ -137,6 +137,7 @@ perf-util-y += arm-spe.o
 perf-util-y += arm-spe-decoder/
 perf-util-y += hisi-ptt.o
 perf-util-y += hisi-ptt-decoder/
+perf-util-y += cxl-hmu.o
 perf-util-y += s390-cpumsf.o
 perf-util-y += powerpc-vpadtl.o
 
