@@ -23,3 +23,24 @@ bool damos_folio_filter_match(struct damos_filter *filter, struct folio *folio);
 unsigned long damon_migrate_pages(struct list_head *folio_list, int target_nid);
 
 bool damos_ops_has_filter(struct damos *s);
+
+#ifdef CONFIG_PERF_EVENTS
+
+void damon_perf_prepare_access_checks(struct damon_ctx *ctx, struct damon_perf_event *event);
+
+struct damon_perf {
+	struct perf_event * __percpu *event;
+	struct damon_perf_buffer __percpu *buffer;
+};
+
+#else /* CONFIG_PERF_EVENTS */
+
+static inline void damon_perf_prepare_access_checks(struct damon_ctx *ctx,
+		struct damon_perf_event *event)
+{
+}
+
+#endif /* CONFIG_PERF_EVENTS */
+
+void damon_ops_init(struct damon_ctx *ctx);
+void damon_ops_cleanup(struct damon_ctx *ctx);
