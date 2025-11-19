@@ -1752,11 +1752,11 @@ static int damon_sysfs_add_target(struct damon_sysfs_target *sys_target,
 	if (!t)
 		return -ENOMEM;
 	damon_add_target(ctx, t);
-	if (damon_target_has_pid(ctx)) {
+	if (damon_target_has_pid(ctx) && !sys_target->obsolete) {
 		t->pid = find_get_pid(sys_target->pid);
-		if (!t->pid)
-			/* caller will destroy targets */
-			return -EINVAL;
+		if (!t->pid) {
+			pr_debug("ignoring invalid pid %d\n", sys_target->pid);
+		}
 	}
 	t->obsolete = sys_target->obsolete;
 	t->min_region_sz = sys_target->region_sz_range->min;
