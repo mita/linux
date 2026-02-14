@@ -104,3 +104,14 @@ const struct kobj_type damon_sysfs_ul_range_ktype = {
 	.default_groups = damon_sysfs_ul_range_groups,
 };
 
+static struct attribute *damon_sysfs_ul_min_attrs[] = {
+	&damon_sysfs_ul_range_min_attr.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(damon_sysfs_ul_min);
+
+const struct kobj_type damon_sysfs_ul_min_ktype = {
+	.release = damon_sysfs_ul_range_release,
+	.sysfs_ops = &kobj_sysfs_ops,
+	.default_groups = damon_sysfs_ul_min_groups,
+};

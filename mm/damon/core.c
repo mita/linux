@@ -217,6 +217,8 @@ int damon_set_regions(struct damon_target *t, struct damon_addr_range *ranges,
 	unsigned int i;
 	int err;
 
+	min_region_sz = max(min_region_sz, t->min_region_sz);
+
 	/* Remove regions which are not in the new ranges */
 	damon_for_each_region_safe(r, next, t) {
 		for (i = 0; i < nr_ranges; i++) {
@@ -479,6 +481,7 @@ struct damon_target *damon_new_target(void)
 
 	t->pid = NULL;
 	t->nr_regions = 0;
+	t->min_region_sz = 0;
 	INIT_LIST_HEAD(&t->regions_list);
 	INIT_LIST_HEAD(&t->list);
 	t->obsolete = false;
@@ -1192,6 +1195,13 @@ static int damon_commit_target(
 	if (src_has_pid)
 		get_pid(src->pid);
 	dst->pid = src->pid;
+	dst->min_region_sz = src->min_region_sz;
+	if (dst->min_region_sz) {
+		if (dst->min_region_sz < DAMON_MIN_REGION_SZ || !is_power_of_2(dst->min_region_sz)) {
+			pr_debug("invalid min_region_sz=%lu\n", dst->min_region_sz);
+			dst->min_region_sz = 0;
+		}
+	}
 	return 0;
 }
 
@@ -1776,6 +1786,8 @@ static bool damos_skip_charged_region(struct damon_target *t,
 	struct damos_quota *quota = &s->quota;
 	unsigned long sz_to_skip;
 
+	min_region_sz = max(min_region_sz, t->min_region_sz);
+
 	/* Skip previously charged regions */
 	if (quota->charge_target_from) {
 		if (t != quota->charge_target_from)
@@ -1828,6 +1840,8 @@ static bool damos_filter_match(struct damon_ctx *ctx, struct damon_target *t,
 	struct damon_target *ti;
 	int target_idx = 0;
 	unsigned long start, end;
+
+	min_region_sz = max(min_region_sz, t->min_region_sz);
 
 	switch (filter->type) {
 	case DAMOS_FILTER_TYPE_TARGET:
@@ -1978,6 +1992,7 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 	struct damos_quota *quota = &s->quota;
 	unsigned long sz = damon_sz_region(r);
 	struct timespec64 begin, end;
+	unsigned long min_region_sz = max(c->min_region_sz, t->min_region_sz);
 	unsigned long sz_applied = 0;
 	unsigned long sz_ops_filter_passed = 0;
 	/*
@@ -2011,7 +2026,7 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 	if (c->ops.apply_scheme) {
 		if (quota->esz && quota->charged_sz + sz > quota->esz) {
 			sz = ALIGN_DOWN(quota->esz - quota->charged_sz,
-					c->min_region_sz);
+					min_region_sz);
 			if (!sz)
 				goto update_stat;
 			damon_split_region_at(t, r, sz);
@@ -2517,7 +2532,9 @@ static void kdamond_merge_regions(struct damon_ctx *c, unsigned int threshold,
 	do {
 		nr_regions = 0;
 		damon_for_each_target(t, c) {
-			damon_merge_regions_of(t, threshold, sz_limit);
+			unsigned long target_sz_limit = max(sz_limit, t->min_region_sz);
+
+			damon_merge_regions_of(t, threshold, target_sz_limit);
 			nr_regions += damon_nr_regions(t);
 		}
 		threshold = max(1, threshold * 2);
@@ -2557,6 +2574,8 @@ static void damon_split_regions_of(struct damon_target *t, int nr_subs,
 	struct damon_region *r, *next;
 	unsigned long sz_region, sz_sub = 0;
 	int i;
+
+	min_region_sz = max(min_region_sz, t->min_region_sz);
 
 	damon_for_each_region_safe(r, next, t) {
 		sz_region = damon_sz_region(r);

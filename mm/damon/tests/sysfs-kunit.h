@@ -70,6 +70,7 @@ static void damon_sysfs_test_add_targets(struct kunit *test)
 		kunit_skip(test, "sysfs_regions alloc fail");
 	}
 
+	sysfs_target->region_sz_range = damon_sysfs_ul_range_alloc(0, 0);
 	sysfs_targets->targets_arr[0] = sysfs_target;
 
 	ctx = damon_new_ctx();
@@ -93,6 +94,7 @@ static void damon_sysfs_test_add_targets(struct kunit *test)
 	kfree(sysfs_targets->targets_arr);
 	kfree(sysfs_targets);
 	kfree(sysfs_target->regions);
+	kfree(sysfs_target->region_sz_range);
 	kfree(sysfs_target);
 }
 
