@@ -244,7 +244,7 @@ static int damon_sysfs_target_add_dirs(struct damon_sysfs_target *target)
 	}
 
 	err = kobject_init_and_add(&region_sz_range->kobj,
-			&damon_sysfs_ul_min_ktype, &target->kobj, "region_sz");
+			&damon_sysfs_ul_range_ktype, &target->kobj, "region_sz");
 	if (err)
 		goto put_region_sz_out;
 	target->region_sz_range = region_sz_range;
@@ -1738,7 +1738,7 @@ static int damon_sysfs_set_regions(struct damon_target *t,
 		if (ranges[i - 1].end > ranges[i].start)
 			goto out;
 	}
-	err = damon_set_regions(t, ranges, sysfs_regions->nr, min_region_sz);
+	err = damon_set_regions(t, ranges, sysfs_regions->nr, min_region_sz, true);
 out:
 	kfree(ranges);
 	return err;
@@ -1761,6 +1761,7 @@ static int damon_sysfs_add_target(struct damon_sysfs_target *sys_target,
 	}
 	t->obsolete = sys_target->obsolete;
 	t->min_region_sz = sys_target->region_sz_range->min;
+	t->max_region_sz = sys_target->region_sz_range->max;
 	return damon_sysfs_set_regions(t, sys_target->regions,
 			ctx->min_region_sz);
 }

@@ -69,10 +69,7 @@ static struct mm_struct *damon_get_mm(struct damon_target *t)
 static int damon_va_evenly_split_region(struct damon_target *t,
 		struct damon_region *r, unsigned int nr_pieces)
 {
-	unsigned long sz_orig, sz_piece, orig_end;
-	struct damon_region *n = NULL, *next;
-	unsigned long start;
-	unsigned int i;
+	unsigned long sz_piece;
 	unsigned long min_region_sz = max(DAMON_MIN_REGION_SZ, t->min_region_sz);
 
 	if (!r || !nr_pieces)
@@ -81,27 +78,12 @@ static int damon_va_evenly_split_region(struct damon_target *t,
 	if (nr_pieces == 1)
 		return 0;
 
-	orig_end = r->ar.end;
-	sz_orig = damon_sz_region(r);
-	sz_piece = ALIGN_DOWN(sz_orig / nr_pieces, min_region_sz);
+	sz_piece = ALIGN_DOWN(damon_sz_region(r) / nr_pieces, min_region_sz);
 
 	if (!sz_piece)
 		return -EINVAL;
 
-	r->ar.end = r->ar.start + sz_piece;
-	next = damon_next_region(r);
-	for (start = r->ar.end, i = 1; i < nr_pieces; start += sz_piece, i++) {
-		n = damon_new_region(start, start + sz_piece);
-		if (!n)
-			return -ENOMEM;
-		damon_insert_region(n, r, next, t);
-		r = n;
-	}
-	/* complement last region for possible rounding error */
-	if (n)
-		n->ar.end = orig_end;
-
-	return 0;
+	return damon_evenly_split_region(t, r, -1, sz_piece);
 }
 
 static unsigned long sz_range(struct damon_addr_range *r)
@@ -281,7 +263,10 @@ static void __damon_va_init_regions(struct damon_ctx *ctx,
 		sz += regions[i].end - regions[i].start;
 	if (ctx->attrs.min_nr_regions)
 		sz /= ctx->attrs.min_nr_regions;
-	sz = max(sz, min_region_sz);
+	if (t->max_region_sz)
+		sz = clamp(sz, min_region_sz, t->max_region_sz);
+	else
+		sz = max(sz, min_region_sz);
 
 	/* Set the initial three regions of the target */
 	for (i = 0; i < 3; i++) {
@@ -320,7 +305,7 @@ static void damon_va_update(struct damon_ctx *ctx)
 	damon_for_each_target(t, ctx) {
 		if (damon_va_three_regions(t, three_regions))
 			continue;
-		damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION_SZ);
+		damon_set_regions(t, three_regions, 3, DAMON_MIN_REGION_SZ, true);
 	}
 }
 
