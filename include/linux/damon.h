@@ -85,6 +85,7 @@ struct damon_region {
 	unsigned int age;
 /* private: Internal value for age calculation. */
 	unsigned int last_nr_accesses;
+	bool access_reported;
 };
 
 /**
@@ -110,6 +111,30 @@ struct damon_target {
 	struct list_head regions_list;
 	struct list_head list;
 	bool obsolete;
+};
+
+/**
+ * struct damon_access_report - Represent single access report information.
+ * @paddr:		Start physical address of the accessed address range.
+ * @vaddr:		Start virtual address of the accessed address range.
+ * @size:		The size of the accessed address range.
+ * @cpu:		The id of the CPU that made the access.
+ * @tid:		The task id of the task that made the access.
+ * @is_write:		Whether the access is write.
+ *
+ * Any DAMON API callers that notified access events can report the information
+ * to DAMON using damon_report_access().  This struct contains the reporting
+ * information.  Refer to damon_report_access() for more details.
+ */
+struct damon_access_report {
+	unsigned long paddr;
+	unsigned long vaddr;
+	unsigned long size;
+	unsigned int cpu;
+	pid_t tid;
+	bool is_write;
+/* private: */
+	unsigned long report_jiffies;	/* when this report is made */
 };
 
 /**
@@ -761,6 +786,49 @@ struct damon_attrs {
 	 * it.
 	 */
 	unsigned long aggr_samples;
+};
+
+/**
+ * enum damon_sample_filter_type - Type of &struct damon_sample_filter.
+ *
+ * @DAMON_FILTER_TYPE_CPUMASK:	Filter by access-generated CPUs.
+ * @DAMON_FILTER_TYPE_THREADS:	Filter by access-generated threads.
+ * @DAMON_FILTER_TYPE_WRITE:	Filter by whether the access was for writing.
+ *
+ * Read &struct damon_sample_control for more details.
+ */
+enum damon_sample_filter_type {
+	DAMON_FILTER_TYPE_CPUMASK,
+	DAMON_FILTER_TYPE_THREADS,
+	DAMON_FILTER_TYPE_WRITE,
+};
+
+/**
+ * struct damon_sample_filter - &struct damon_access_report filter.
+ *
+ * @type:	The type of this filter.
+ * @matching:	Whether it is for condition-matching reports.
+ * @allow:	Whether to include or excludie the @matching reports.
+ * @cpumask:	Access-generated CPUs if @type is DAMON_FILTER_TYPE_CPUMASK.
+ * @tid_arr:	Array of access-generated thread ids, if @type is
+ *		DAMON_FILTER_TYPE_THREADS.
+ * @nr_tids:	Size of @tid_arr, if @type is DAMON_FILTER_TYPE_THREADS.
+ * @list:	List head for siblings.
+ *
+ * Read &struct damon_sample_control for more details.
+ */
+struct damon_sample_filter {
+	enum damon_sample_filter_type type;
+	bool matching;
+	bool allow;
+	union {
+		cpumask_t cpumask;
+		struct {
+			pid_t *tid_arr;
+			int nr_tids;
+		};
+	};
+	struct list_head list;
 };
 
 /**
