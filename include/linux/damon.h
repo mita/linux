@@ -111,6 +111,30 @@ struct damon_target {
 };
 
 /**
+ * struct damon_access_report - Represent single acces report information.
+ * @paddr:		Start physical address of the accessed address range.
+ * @vaddr:		Start virtual address of the accessed address range.
+ * @size:		The size of the accessed address range.
+ * @cpu:		The id of the CPU that made the access.
+ * @tid:		The task id of the task that made the access.
+ * @is_write:		Whether the access is write.
+ *
+ * Any DAMON API callers that notified access events can report the information
+ * to DAMON using damon_report_access().  This struct contains the reporting
+ * infomration.  Refer to damon_report_access() for more details.
+ */
+struct damon_access_report {
+	unsigned long paddr;
+	unsigned long vaddr;
+	unsigned long size;
+	unsigned int cpu;
+	pid_t tid;
+	bool is_write;
+/* private: */
+	unsigned long report_jiffies;	/* when this report is made */
+};
+
+/**
  * enum damos_action - Represents an action of a Data Access Monitoring-based
  * Operation Scheme.
  *
