@@ -2726,6 +2726,29 @@ out:
 	return sysfs_emit(buf, "%d\n", pid);
 }
 
+static ssize_t total_reports_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	struct damon_sysfs_kdamond *kdamond = container_of(kobj,
+		struct damon_sysfs_kdamond, kobj);
+	struct damon_ctx *ctx;
+	u64 total_reports = 0;
+
+	if (!mutex_trylock(&damon_sysfs_lock))
+		return -EBUSY;
+	ctx = kdamond->damon_ctx;
+	if (!ctx)
+		goto out;
+
+	mutex_lock(&ctx->kdamond_lock);
+	if (ctx->kdamond)
+		total_reports = ctx->total_reports;
+	mutex_unlock(&ctx->kdamond_lock);
+out:
+	mutex_unlock(&damon_sysfs_lock);
+	return sysfs_emit(buf, "%llu\n", total_reports);
+}
+
 static ssize_t refresh_ms_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
@@ -2766,12 +2789,16 @@ static struct kobj_attribute damon_sysfs_kdamond_state_attr =
 static struct kobj_attribute damon_sysfs_kdamond_pid_attr =
 		__ATTR_RO_MODE(pid, 0400);
 
+static struct kobj_attribute damon_sysfs_kdamond_total_reports_attr =
+		__ATTR_RO_MODE(total_reports, 0400);
+
 static struct kobj_attribute damon_sysfs_kdamond_refresh_ms_attr =
 		__ATTR_RW_MODE(refresh_ms, 0600);
 
 static struct attribute *damon_sysfs_kdamond_attrs[] = {
 	&damon_sysfs_kdamond_state_attr.attr,
 	&damon_sysfs_kdamond_pid_attr.attr,
+	&damon_sysfs_kdamond_total_reports_attr.attr,
 	&damon_sysfs_kdamond_refresh_ms_attr.attr,
 	NULL,
 };

@@ -889,6 +889,7 @@ struct damon_perf_event {
  * @ops:	Set of monitoring operations for given use cases.
  * @addr_unit:	Scale factor for core to ops address conversion.
  * @min_region_sz:	Minimum region size.
+ * @total_reports:	Total number of valid access reports
  * @perf_events:	Head of perf events (&damon_perf_event) list.
  * @adaptive_targets:	Head of monitoring targets (&damon_target) list.
  * @schemes:		Head of schemes (&damos) list.
@@ -943,6 +944,8 @@ struct damon_ctx {
 	struct damon_operations ops;
 	unsigned long addr_unit;
 	unsigned long min_region_sz;
+
+	u64 total_reports;
 
 	struct list_head perf_events;
 	struct list_head adaptive_targets;

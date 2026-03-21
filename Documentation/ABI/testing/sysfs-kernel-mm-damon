@@ -44,6 +44,8 @@ Contact:	SeongJae Park <sj@kernel.org>
 Description:	Reading this file returns the pid of the kdamond if it is
 		running.
 
+What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/total_reports
+
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/refresh_ms
 Date:		Jul 2025
 Contact:	SeongJae Park <sj@kernel.org>

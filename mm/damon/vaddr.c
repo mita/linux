@@ -1197,6 +1197,9 @@ static void damon_va_perf_check_accesses_by_vaddr(struct damon_ctx *ctx,
 			struct damon_access_report *report =
 				&buffer->reports[(tail + i) & (buffer->size - 1)];
 
+			if (!report->vaddr)
+				continue;
+			ctx->total_reports++;
 			damon_vaddr_histogram_add(&perf->vaddr_histogram, report->tgid,
 							report->vaddr & PAGE_MASK);
 		}
@@ -1276,6 +1279,9 @@ void damon_perf_populate_paddr_histogram(struct damon_ctx *ctx, struct damon_per
 			struct damon_access_report *report =
 				&buffer->reports[(tail + i) & (buffer->size - 1)];
 
+			if (!report->paddr)
+				continue;
+			ctx->total_reports++;
 			damon_paddr_histogram_add(&perf->paddr_histogram,
 							report->paddr & PAGE_MASK);
 		}
